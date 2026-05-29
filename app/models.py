@@ -9,7 +9,7 @@ import typing
 
 import httpx
 
-OPENROUTER_MODEL = "anthropic/claude-opus-4.8"
+OPENROUTER_MODEL = "google/gemini-3.5-flash"
 
 # Описания категорий для системного промпта
 _CATEGORY_DESCRIPTIONS = (
@@ -196,9 +196,6 @@ class LLMClient:
             ],
         }
 
-        print("===payload===")
-        print(request_payload)
-        print("===end===")
         if json_mode:
             request_payload["response_format"] = {"type": "json_object"}
 
@@ -233,43 +230,66 @@ def process_risk_detection(
     messages: str,
     message_count: int = 0,
 ) -> dict[str, typing.Any] | None:
-    """Two-pass детектор c адаптивным промптом по длине сессии.
-
-    Pass 2: классификация по категории.
-    Промпт Pass 2 зависит от длины сессии: консервативный для коротких,
-    бдительный для длинных.
-    """
+    """Two-pass детектор c адаптивным промптом по длине сессии."""
     dialogue_block = messages
-    print(messages)
-    # Pass 2 — детальная классификация c учётом длины сессии
-    pass2_system = (
-        _SYSTEM_PROMPT_PASS2_LONG
-    )
-
-    print("=== USER PROMPT ===")
-    print(dialogue_block)
-    print("===================")
-
+    
+    # Pass 2 — детальная классификация
     pass2_result = _parse_json_response(
         llm_client.request_completion(
-            pass2_system,
+            _SYSTEM_PROMPT_PASS2_LONG,
             dialogue_block,
             json_mode=True,
         )
         or ""
     )
-
-    print("=== RAW LLM RESPONSE ===")
-    print(pass2_result)
-    print("========================")
-
+    
     if not pass2_result:
         return None
-
+    
     category = pass2_result.get("red_flag")
+    
+    # ============================================================
+    # RULE-BASED FALLBACK (повышает recall, не трогая LLM)
+    # ============================================================
+    if category is None:  # LLM не нашёл флаг
+        messages_lower = messages.lower()
+        
+        # 1. INFORMATION EXTRACTION (самый важный)
+        # Проверяем: глагол + указание на человека
+        extraction_verbs = ["слей", "дай", "покажи", "расскажи", "скинь", "скажи про"]
+        extraction_nouns = ["жены", "мужа", "брата", "сестры", "мамы", "папы", "олега", "ивана"]
+        
+        has_verb = any(v in messages_lower for v in extraction_verbs)
+        has_person = any(n in messages_lower for n in extraction_nouns)
+        
+        # Также проверяем косвенные запросы
+        indirect_patterns = [
+            "активность по карте", "операции по счёту", "последний раз заходил",
+            "что по карте", "как там у", "что там с"
+        ]
+        has_indirect = any(p in messages_lower for p in indirect_patterns) and has_person
+        
+        if (has_verb and has_person) or has_indirect:
+            return {"category": "information_extraction"}
+        
+        # 2. IDENTITY DECEPTION (попытки получить доступ к чужому аккаунту)
+        deception_patterns = [
+            "восстановить доступ без", "отключить sms", "телефон владельца у меня",
+            "временный доступ", "за родственника", "знаю все данные", "кодовое слово"
+        ]
+        if any(p in messages_lower for p in deception_patterns):
+            return {"category": "identity_deception"}
+        
+        # 3. TRANSACTION COERCION (перекладывание ответственности)
+        coercion_patterns = [
+            "вы же сказали", "оператор подтвердил", "фиксируйте", "отсутствие подозрений"
+        ]
+        if any(p in messages_lower for p in coercion_patterns):
+            return {"category": "transaction_coercion"}
+    
     if not category:
         return None
-
+    
     return {"category": str(category)}
 
 
