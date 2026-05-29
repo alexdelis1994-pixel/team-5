@@ -19,8 +19,8 @@ class DialogueMessage(BaseModel):
 
 
 def format_dialogue(messages: list[DialogueMessage]) -> str:
-    """Склеивает сообщения пользователя в одну строку через разделитель."""
-    return " | ".join(one_message.content for one_message in messages if one_message.role == "user")
+    """Форматирует полный диалог с маркировкой ролей."""
+    return "\n".join(f"{one_message.role}: {one_message.content}" for one_message in messages)
 
 
 @typing.final
@@ -51,9 +51,8 @@ def check_dialogue(
     start_time = time.perf_counter()
 
     raw_text = format_dialogue(request_body.messages)
-    message_count = sum(1 for one_message in request_body.messages if one_message.role == "user")
 
-    response = process_risk_detection(http_request.app.state.llm_client, raw_text, message_count)
+    response = process_risk_detection(http_request.app.state.llm_client, raw_text)
     predicted_red_flags = [RedFlagItem(category=response["category"])] if response else []
 
     processing_time_ms = int((time.perf_counter() - start_time) * 1000)
