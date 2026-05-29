@@ -42,7 +42,7 @@ def main() -> None:
         expected_category = expected_flags[0]["category"] if expected_flags else None
 
         raw_text = format_dialogue(session["messages"])
-        result = process_risk_detection(llm, raw_text)
+        result = process_risk_detection(llm, raw_text, len(session["messages"]))
         predicted_category = result["category"] if result else None
 
         expected_positive = expected_category is not None

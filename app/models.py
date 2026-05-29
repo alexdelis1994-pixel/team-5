@@ -8,7 +8,10 @@ import typing
 
 import httpx
 
-OPENROUTER_MODEL = "google/gemini-2.5-flash"
+OPENROUTER_MODEL_SMART = "google/gemini-2.5-pro"  # short sessions: better reasoning
+OPENROUTER_MODEL_FAST = "google/gemini-2.5-flash"  # long sessions: cheaper
+
+_SHORT_SESSION_THRESHOLD = 10  # messages
 
 # Описания категорий для системного промпта
 _CATEGORY_DESCRIPTIONS = (
@@ -261,12 +264,13 @@ class LLMClient:
         user_prompt: str,
         *,
         json_mode: bool = True,
+        llm_model: str = OPENROUTER_MODEL_FAST,
     ) -> str | None:
         if not self.api_key:
             return None
 
         request_payload: dict[str, typing.Any] = {
-            "model": OPENROUTER_MODEL,
+            "model": llm_model,
             "max_tokens": 256,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -302,8 +306,10 @@ def _parse_json_response(raw_response: str) -> dict[str, typing.Any] | None:
 def process_risk_detection(
     llm_client: LLMClient,
     messages: str,
+    message_count: int = 0,
 ) -> dict[str, typing.Any] | None:
     """Однопроходный детектор: классификация red flag за один вызов."""
+    selected_model = OPENROUTER_MODEL_SMART if message_count <= _SHORT_SESSION_THRESHOLD else OPENROUTER_MODEL_FAST
     dialogue_block = f"Диалог:\n{messages}"
 
     llm_response = _parse_json_response(
@@ -311,6 +317,7 @@ def process_risk_detection(
             _SYSTEM_PROMPT_PASS2,
             f"Определи категорию red flag:\n\n{dialogue_block}",
             json_mode=True,
+            llm_model=selected_model,
         )
         or ""
     )
