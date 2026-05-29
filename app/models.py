@@ -8,7 +8,7 @@ import typing
 
 import httpx
 
-OPENROUTER_MODEL = "google/gemini-2.5-flash"
+OPENROUTER_MODEL = "openai/gpt-5.4"
 
 # Описания категорий для системного промпта
 _CATEGORY_DESCRIPTIONS = (
