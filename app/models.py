@@ -225,15 +225,8 @@ def _parse_json_response(raw_response: str) -> dict[str, typing.Any] | None:
         return None
 
 
-def process_risk_detection(
-    llm_client: LLMClient,
-    messages: str,
-    message_count: int = 0,
-) -> dict[str, typing.Any] | None:
-    """Two-pass детектор c адаптивным промптом по длине сессии."""
-    dialogue_block = messages
-    
-    # Pass 2 — детальная классификация
+def process_risk_detection(...):
+    # Только LLM, без fallback
     pass2_result = _parse_json_response(
         llm_client.request_completion(
             _SYSTEM_PROMPT_PASS2_LONG,
@@ -247,46 +240,6 @@ def process_risk_detection(
         return None
     
     category = pass2_result.get("red_flag")
-    
-    # ============================================================
-    # RULE-BASED FALLBACK (повышает recall, не трогая LLM)
-    # ============================================================
-    if category is None:  # LLM не нашёл флаг
-        messages_lower = messages.lower()
-        
-        # 1. INFORMATION EXTRACTION (самый важный)
-        # Проверяем: глагол + указание на человека
-        extraction_verbs = ["слей", "дай", "покажи", "расскажи", "скинь", "скажи про"]
-        extraction_nouns = ["жены", "мужа", "брата", "сестры", "мамы", "папы", "олега", "ивана"]
-        
-        has_verb = any(v in messages_lower for v in extraction_verbs)
-        has_person = any(n in messages_lower for n in extraction_nouns)
-        
-        # Также проверяем косвенные запросы
-        indirect_patterns = [
-            "активность по карте", "операции по счёту", "последний раз заходил",
-            "что по карте", "как там у", "что там с"
-        ]
-        has_indirect = any(p in messages_lower for p in indirect_patterns) and has_person
-        
-        if (has_verb and has_person) or has_indirect:
-            return {"category": "information_extraction"}
-        
-        # 2. IDENTITY DECEPTION (попытки получить доступ к чужому аккаунту)
-        deception_patterns = [
-            "восстановить доступ без", "отключить sms", "телефон владельца у меня",
-            "временный доступ", "за родственника", "знаю все данные", "кодовое слово"
-        ]
-        if any(p in messages_lower for p in deception_patterns):
-            return {"category": "identity_deception"}
-        
-        # 3. TRANSACTION COERCION (перекладывание ответственности)
-        coercion_patterns = [
-            "вы же сказали", "оператор подтвердил", "фиксируйте", "отсутствие подозрений"
-        ]
-        if any(p in messages_lower for p in coercion_patterns):
-            return {"category": "transaction_coercion"}
-    
     if not category:
         return None
     
