@@ -9,7 +9,7 @@ import typing
 
 import httpx
 
-OPENROUTER_MODEL = "google/gemini-3.5-flash"
+OPENROUTER_MODEL = "openai/gpt-5.4-nano"
 
 # Описания категорий для системного промпта
 _CATEGORY_DESCRIPTIONS = (
@@ -143,6 +143,14 @@ _FEW_SHOT_EXAMPLES = """
 --- ПРИМЕР 21 (флаг: information_extraction, ещё одно прямое) ---
 Дай инфу по Иванову, живо!
 ОТВЕТ: {"red_flag": "information_extraction"}
+
+--- ПРИМЕР 22 (флаг: information_extraction, через вопрос о самочувствии) ---
+Мама пожилая, одна живёт. Вы не подскажете, она сегодня заходила в приложение? Просто переживаю.
+ОТВЕТ: {"red_flag": "information_extraction"}
+
+--- ПРИМЕР 23 (флаг: identity_deception, мягкий) ---
+Я понимаю, что это звучит странно. Но если человек забыл пароль и потерял телефон, а я знаю его паспортные данные — это вообще реально восстановить?
+ОТВЕТ: {"red_flag": "identity_deception"}
 """
 
 # Pass 2 (LONG): детальная классификация
@@ -181,7 +189,7 @@ class LLMClient:
         self,
         system_prompt: str,
         user_prompt: str,
-        *,
+        model: str,
         json_mode: bool = True,
     ) -> str | None:
         if not self.api_key:
@@ -189,7 +197,7 @@ class LLMClient:
             return None
 
         request_payload: dict[str, typing.Any] = {
-            "model": OPENROUTER_MODEL,
+            "model": model, # OPENROUTER_MODEL,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -225,25 +233,52 @@ def _parse_json_response(raw_response: str) -> dict[str, typing.Any] | None:
         return None
 
 
-def process_risk_detection(...):
-    # Только LLM, без fallback
-    pass2_result = _parse_json_response(
-        llm_client.request_completion(
-            _SYSTEM_PROMPT_PASS2_LONG,
-            dialogue_block,
-            json_mode=True,
-        )
-        or ""
+def process_risk_detection(
+    llm_client: LLMClient,
+    messages: str,
+    message_count: int = 0,
+) -> dict[str, typing.Any] | None:
+    dialogue_block = messages
+    pass2_system = _SYSTEM_PROMPT_PASS2_LONG
+
+    print("=== USER PROMPT ===")
+    print(dialogue_block)
+    print("===================")
+
+    # Пробуем дешёвую модель
+    cheap_result = llm_client.request_completion(
+        pass2_system,
+        dialogue_block,
+        model="google/gemini-3.5-flash",
+        json_mode=True,
     )
     
-    if not pass2_result:
-        return None
+    parsed = _parse_json_response(cheap_result or "")
     
-    category = pass2_result.get("red_flag")
+    # Если дешёвая не нашла флаг, пробуем основную
+    if not parsed or not parsed.get("red_flag"):
+        print("Cheap model missed, trying main model...")
+        main_result = llm_client.request_completion(
+            pass2_system,
+            dialogue_block,
+            model="openai/gpt-5.4-nano",
+            json_mode=True,
+        )
+        parsed = _parse_json_response(main_result or "")
+    
+    print("=== RAW LLM RESPONSE ===")
+    print(parsed)
+    print("========================")
+
+    if not parsed:
+        return None
+
+    category = parsed.get("red_flag")
     if not category:
         return None
-    
+
     return {"category": str(category)}
+
 
 
 def load_llm() -> LLMClient:
