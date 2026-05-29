@@ -8,7 +8,7 @@ import typing
 
 import httpx
 
-OPENROUTER_MODEL = "google/gemini-2.5-flash"
+OPENROUTER_MODEL = "anthropic/claude-opus-4.8-fast"
 
 # Описания категорий для системного промпта
 _CATEGORY_DESCRIPTIONS = (
