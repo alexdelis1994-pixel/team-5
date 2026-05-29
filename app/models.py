@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import types
 import typing
 
 import httpx
 
-OPENROUTER_MODEL_SMART = "google/gemini-2.5-pro"  # short sessions: better reasoning
-OPENROUTER_MODEL_FAST = "google/gemini-2.5-flash"  # long sessions: cheaper
-
-_SHORT_SESSION_THRESHOLD = 10  # messages
+OPENROUTER_MODEL = "anthropic/claude-opus-4-5"
 
 _SYSTEM_PROMPT = """Ты — эксперт по безопасности банковских чатов.
-Проанализируй диалог целиком и определи категорию red flag.
+Проанализируй диалог и для каждой категории red flag оцени наличие признаков.
 
 === КАТЕГОРИИ RED FLAGS ===
 
@@ -83,15 +81,38 @@ IT-терминологии при описании своей проблемы 
 - Клиент, спрашивающий о своих операциях — НЕ red flag.
 - Жертва мошенничества после перевода — НЕ red flag.
 - Смотри на ПАТТЕРН диалога целиком: как начиналось и куда пришло.
-- Если подходят несколько категорий — выбери наиболее точную по сути атаки.
 
 === ФОРМАТ ОТВЕТА ===
-Сначала кратко опиши (1-2 предложения) что именно происходит в диалоге с точки зрения
-намерений пользователя. Затем сопоставь это с категориями и выбери подходящую.
+Для каждой категории укажи yes/no и уверенность (high/medium/low).
+Затем выбери одну категорию с наибольшей уверенностью yes, либо null если нет ни одной.
 
-Верни JSON:
-{"reasoning": "описание намерений пользователя", "red_flag": "название_категории"}
-или {"reasoning": "описание намерений пользователя", "red_flag": null}"""
+Верни JSON строго в формате:
+{
+  "scores": {
+    "information_extraction": {"match": "yes/no", "confidence": "high/medium/low"},
+    "identity_deception": {"match": "yes/no", "confidence": "high/medium/low"},
+    "transaction_coercion": {"match": "yes/no", "confidence": "high/medium/low"},
+    "policy_manipulation": {"match": "yes/no", "confidence": "high/medium/low"},
+    "adversarial_attack": {"match": "yes/no", "confidence": "high/medium/low"},
+    "scope_violation": {"match": "yes/no", "confidence": "high/medium/low"}
+  },
+  "reasoning": "одно предложение о паттерне",
+  "red_flag": "название_категории или null"
+}"""
+
+_CONFIDENCE_RANK = types.MappingProxyType({"high": 2, "medium": 1, "low": 0})
+
+
+def _get_best_category(category_scores: dict[str, dict[str, str]]) -> str | None:
+    best_category: str | None = None
+    best_confidence_rank = -1
+    for category_name, verdict in category_scores.items():
+        if verdict.get("match") == "yes":
+            confidence_rank = _CONFIDENCE_RANK.get(verdict.get("confidence", "low"), 0)
+            if confidence_rank > best_confidence_rank:
+                best_confidence_rank = confidence_rank
+                best_category = category_name
+    return best_category
 
 
 @typing.final
@@ -107,14 +128,14 @@ class LLMClient:
         user_prompt: str,
         *,
         json_mode: bool = True,
-        llm_model: str = OPENROUTER_MODEL_FAST,
+        llm_model: str = OPENROUTER_MODEL,
     ) -> str | None:
         if not self.api_key:
             return None
 
         request_payload: dict[str, typing.Any] = {
             "model": llm_model,
-            "max_tokens": 512,
+            "max_tokens": 1024,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -131,7 +152,7 @@ class LLMClient:
                     "Content-Type": "application/json",
                 },
                 json=request_payload,
-                timeout=30.0,
+                timeout=60.0,
                 verify=False,  # noqa: S501
             )
             return str(response.json()["choices"][0]["message"]["content"])
@@ -149,25 +170,25 @@ def _parse_json_response(raw_response: str) -> dict[str, typing.Any] | None:
 def process_risk_detection(
     llm_client: LLMClient,
     messages: str,
-    message_count: int = 0,
+    message_count: int = 0,  # noqa: ARG001
 ) -> dict[str, typing.Any] | None:
-    """Single-pass detector with detailed descriptions and abstract few-shot examples."""
-    selected_model = OPENROUTER_MODEL_SMART if message_count <= _SHORT_SESSION_THRESHOLD else OPENROUTER_MODEL_FAST
+    """Structured per-category scoring with confidence-based selection."""
     dialogue_block = f"Диалог:\n{messages}"
 
     llm_response = _parse_json_response(
         llm_client.request_completion(
             _SYSTEM_PROMPT,
-            f"Определи категорию red flag:\n\n{dialogue_block}",
+            f"Оцени каждую категорию red flag:\n\n{dialogue_block}",
             json_mode=True,
-            llm_model=selected_model,
         )
         or ""
     )
     if not llm_response:
         return None
 
-    category = llm_response.get("red_flag")
+    category_scores = llm_response.get("scores")
+    category = _get_best_category(category_scores) if category_scores else llm_response.get("red_flag")
+
     if not category:
         return None
 
