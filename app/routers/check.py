@@ -51,7 +51,7 @@ def check_dialogue(
     start_time = time.perf_counter()
 
     raw_text = format_dialogue(request_body.messages)
-    message_count = len(request_body.messages)
+    message_count = sum(1 for one_message in request_body.messages if one_message.role == "user")
 
     response = process_risk_detection(http_request.app.state.llm_client, raw_text, message_count)
     predicted_red_flags = [RedFlagItem(category=response["category"])] if response else []
