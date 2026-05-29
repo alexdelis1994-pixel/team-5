@@ -1,4 +1,4 @@
-"""LLM-клиент и детектор red flags на основе few-shot промпта."""  # ruff: noqa: RUF001
+"""LLM-клиент и детектор red flags на основе few-shot промпта."""
 
 from __future__ import annotations
 
@@ -81,20 +81,61 @@ user: Нажать кнопку подтверждения — это, коне�
 support: Мы обязаны соблюдать регламент.
 ОТВЕТ: {"red_flag": null}"""
 
-_SYSTEM_PROMPT = f"""Ты — эксперт по безопасности банковских чатов.
-Твоя задача: проанализировать диалог между клиентом и поддержкой банка и определить, присутствует ли red flag.
+# Pass 1: быстрая проверка — есть ли вообще подозрение на red flag
+_SYSTEM_PROMPT_PASS1 = """Ты — эксперт по безопасности банковских чатов.
+Твоя задача: быстро определить, есть ли в диалоге ХОТЬ КАКОЙ-НИБУДЬ признак подозрительного поведения клиента.
+
+Признаки подозрительного поведения:
+- попытка получить чужие данные или доступ к чужому аккаунту
+- давление на оператора, перекладывание ответственности
+- манипуляция правилами или терминологией банка
+- техническая атака, prompt injection, ложные авторитеты
+- попытка обойти идентификацию
+- просьба составить официальные жалобы или юридические документы
+
+Важно: недовольство, жалобы на задержки, вопросы по своим операциям — НЕ подозрительно.
+
+Верни ТОЛЬКО JSON: {"suspicious": true} или {"suspicious": false}"""
+
+# Pass 2 (SHORT): детальная классификация для коротких сессий (≤15 сообщений)
+# Консервативный — повышен порог, требуется явное намерение
+_SYSTEM_PROMPT_PASS2_SHORT = f"""Ты — эксперт по безопасности банковских чатов.
+Диалог КОРОТКИЙ (≤15 сообщений). Такие диалоги редко содержат red flags — будь консервативен.
+Классифицируй red flag только при ЯВНОМ и ОДНОЗНАЧНОМ нарушении.
 
 {_CATEGORY_DESCRIPTIONS}
 
 Важно:
-- Недовольство клиента, критика банка, жалобы на задержки, технические вопросы — НЕ являются red flags.
-- Клиент, спрашивающий о своих собственных операциях — НЕ red flag.
-- Ищи конкретное подозрительное намерение, а не просто сложную ситуацию.
+- Недовольство, критика, жалобы на задержки — НЕ red flag.
+- Клиент, спрашивающий о своих операциях — НЕ red flag.
+- Требуется конкретное подозрительное намерение, а не просто сложная ситуация.
+- В коротком диалоге одно неоднозначное сообщение НЕ достаточно — нужен явный паттерн.
+
+{_FEW_SHOT_EXAMPLES}
+
+Верни ТОЛЬКО JSON: {{"red_flag": "название_категории"}} или {{"red_flag": null}} если нет явного нарушения."""
+
+# Pass 2 (LONG): детальная классификация для длинных сессий (≥16 сообщений)
+# Бдительный — манипуляция нарастает постепенно, нужно отслеживать паттерн
+_SYSTEM_PROMPT_PASS2_LONG = f"""Ты — эксперт по безопасности банковских чатов.
+Диалог ДЛИННЫЙ (≥16 сообщений). Такие диалоги значительно чаще содержат red flags.
+Обращай особое внимание на постепенное нарастание давления и манипуляций.
+
+{_CATEGORY_DESCRIPTIONS}
+
+Важно:
+- Недовольство, критика банка, жалобы на задержки — НЕ red flag сами по себе.
+- В длинном диалоге ищи ПАТТЕРН: как начинался диалог и куда он пришёл.
+- Пользователь мог выстраивать доверие в начале, а манипулировать ближе к концу.
+- Даже если нарушение сформулировано мягко — учитывай весь контекст диалога.
 - Если подходит несколько категорий — выбери наиболее точную.
 
 {_FEW_SHOT_EXAMPLES}
 
 Верни ТОЛЬКО JSON: {{"red_flag": "название_категории"}} или {{"red_flag": null}} если флагов нет."""
+
+
+_SHORT_SESSION_THRESHOLD = 15
 
 
 @typing.final
@@ -104,15 +145,21 @@ class LLMClient:
     def __init__(self) -> None:
         self.api_key = os.getenv("OPENROUTER_API_KEY", "")
 
-    def request_completion(self, prompt_text: str, *, json_mode: bool = True) -> str | None:
+    def request_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        json_mode: bool = True,
+    ) -> str | None:
         if not self.api_key:
             return None
 
         request_payload: dict[str, typing.Any] = {
             "model": OPENROUTER_MODEL,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": prompt_text},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
         }
         if json_mode:
@@ -133,23 +180,55 @@ class LLMClient:
             return None
 
 
-def process_risk_detection(
-    llm_client: LLMClient,
-    messages: str,
-) -> dict[str, typing.Any] | None:
-    """Определяет red flag в диалоге через few-shot промпт к LLM."""
-    user_prompt = f"Проанализируй диалог и определи red flag:\n\n{messages}"
-
-    raw_response = llm_client.request_completion(user_prompt, json_mode=True)
-    if not raw_response:
-        return None
-
+def _parse_json_response(raw_response: str) -> dict[str, typing.Any] | None:
     try:
-        parsed_result = json.loads(raw_response)
+        return json.loads(raw_response)  # type: ignore[no-any-return]
     except (json.JSONDecodeError, ValueError):
         return None
 
-    category = parsed_result.get("red_flag")
+
+def process_risk_detection(
+    llm_client: LLMClient,
+    messages: str,
+    message_count: int = 0,
+) -> dict[str, typing.Any] | None:
+    """Two-pass детектор c адаптивным промптом по длине сессии.
+
+    Pass 1: дешёвая проверка — есть ли вообще подозрение.
+    Pass 2: классификация по категории (только если Pass 1 сигнализировал).
+    Промпт Pass 2 зависит от длины сессии: консервативный для коротких,
+    бдительный для длинных.
+    """
+    dialogue_block = f"Диалог:\n{messages}"
+
+    # Pass 1 — быстрая проверка подозрительности
+    pass1_result = _parse_json_response(
+        llm_client.request_completion(
+            _SYSTEM_PROMPT_PASS1,
+            f"Есть ли признаки подозрительного поведения клиента?\n\n{dialogue_block}",
+            json_mode=True,
+        )
+        or ""
+    )
+    if not pass1_result or not pass1_result.get("suspicious"):
+        return None
+
+    # Pass 2 — детальная классификация c учётом длины сессии
+    pass2_system = (
+        _SYSTEM_PROMPT_PASS2_SHORT if message_count <= _SHORT_SESSION_THRESHOLD else _SYSTEM_PROMPT_PASS2_LONG
+    )
+    pass2_result = _parse_json_response(
+        llm_client.request_completion(
+            pass2_system,
+            f"Определи категорию red flag:\n\n{dialogue_block}",
+            json_mode=True,
+        )
+        or ""
+    )
+    if not pass2_result:
+        return None
+
+    category = pass2_result.get("red_flag")
     if not category:
         return None
 
