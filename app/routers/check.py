@@ -19,8 +19,8 @@ class DialogueMessage(BaseModel):
 
 
 def format_dialogue(messages: list[DialogueMessage]) -> str:
-    """Форматирует историю сообщений диалога в один текстовый блок."""
-    return "\n".join(f"{one_message.role}: {one_message.content}" for one_message in messages)
+    """Склеивает сообщения пользователя в одну строку через разделитель."""
+    return " | ".join(one_message.content for one_message in messages if one_message.role == "user")
 
 
 @typing.final
